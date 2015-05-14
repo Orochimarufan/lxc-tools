@@ -1,0 +1,138 @@
+#!/usr/bin/python
+
+import argparse
+import os
+import sys
+import subprocess
+
+
+class Error(SystemExit):
+    def __init__(self, msg):
+        self.msg = msg
+        super().__init__("%s: %s" % (sys.argv[0], msg))
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("-n", "--name", help="The container name")
+parser.add_argument("origin", nargs="?", help="The source of the mount (block device/bind origin)")
+parser.add_argument("mountpoint", nargs="?", help="The name of the mount (becomes /run/lxc/shared/<container>/<name>/)")
+parser.add_argument("-t", "--type", help="filesystem type, 'bind' indicates bind mount, 'auto' is automatic block device mount. default=bind", default="bind")
+parser.add_argument("-o", "--options", help="Mount options")
+parser.add_argument("-u", "--umount", "--unmount", dest="unmount", action="store_true", help="Don't mount, unmount. Origin becomes the mountpoint name, mountpoint shouldn't be specified.")
+parser.add_argument("-r", "--remount", action="store_true", help="Remount. Like with unmount, origin becomes the mountpoint name and mountpoint doesn't get speicified.")
+parser.add_argument("-l", "--list", action="store_true", help="List current shared mounts")
+parser.add_argument("-a", "--all", action="store_true", help="Apply to all containers")
+args = parser.parse_args()
+
+
+if not args.name and not args.all or args.name and args.all:
+    raise Error("Must specify either --name or --all")
+
+SHARED_DIR = "/run/lxc/shared"
+
+
+SHARED_DEPTH=len(SHARED_DIR.split("/"))
+
+def get_local_path(path):
+    return "/".join(path.split("/")[SHARED_DEPTH+1:])
+
+def get_local_path_fancy(path):
+    return "<shared>/%s" % get_local_path(path)
+
+def get_name(path):
+    return path.split("/")[SHARED_DEPTH]
+
+def list_mounts():
+    return [x for x in (line.split() for line in subprocess.check_output("/sbin/mount").decode().split("\n")) if len(x)==6]
+
+
+if args.all and args.list:
+    conts={}
+    for device, on, mountpoint, type, fstype, options in list_mounts():
+        if mountpoint.startswith(SHARED_DIR + "/"):
+            cont = get_name(mountpoint)
+            text = " ".join((device, on, get_local_path_fancy(mountpoint), type, fstype, options))
+            if cont not in conts:
+                conts[cont] = [text]
+            else:
+                conts[cont].append(text)
+    for cont, mounts in conts.items():
+        print("Shared Mounts for container %s:" % cont, end="\n\t")
+        print("\n\t".join(mounts))
+    raise SystemExit(0)
+
+if args.all:
+    SHARED_PATHS = list(filter(os.path.isdir, (os.path.join(SHARED_DIR, name) for name in os.listdir(SHARED_DIR))))
+    if not SHARED_PATHS:
+        raise Error("No containers with shared mounts running!")
+else:
+    SHARED_PATHS = [os.path.join(SHARED_DIR, args.name)]
+
+    if not os.path.isdir(SHARED_PATHS[0]):
+        raise Error("%s doesnt exist, aborting!" % SHARED_PATH)
+
+
+if len(SHARED_PATHS) == 1:
+    def mount(*args):
+        os.execv("/sbin/mount", ("mount",) + args)
+    def umount(*args):
+        os.execv("/sbin/umount", ("umount",) +args)
+else:
+    def mount(*args):
+        subprocess.check_call(("/sbin/mount",) +args)
+    def umount(*args):
+        subprocess.check_call(("/sbin/umount",) +args)
+
+
+for SHARED_PATH in SHARED_PATHS:
+    try:
+        if args.list:
+            print("Shared Mounts for %s:" % get_name(SHARED_PATH), end="\n\t")
+            for device, on, mountpoint, type, fstype, options in list_mounts():
+                if mountpoint.startswith(SHARED_PATH):
+                    print(" ".join((device, on, get_local_path_fancy(mountpoint), type, fstype, options)), end="\n\t")
+            print(end="\r")
+
+        elif args.unmount or args.remount:
+            if args.mountpoint:
+                raise Error("when --unmount'ing or --remount'ing, only origin should be scpecified!")
+            if args.unmount and args.remount:
+                raise Error("can only specify either --remount or --unmount!")
+
+            mountpoint_name = args.origin
+
+            mountpoint = os.path.join(SHARED_PATH, mountpoint_name)
+
+            if args.unmount:
+                umount(mountpoint)
+            elif not args.options:
+                raise Error("-o is required when --remount'ing!")
+            else:
+                mount(mountpoint, "-o", "remount," + args.options)
+
+        else:
+            if args.mountpoint:
+                mountpoint_name = args.mountpoint
+            else:
+                mountpoint_name = os.path.basename(args.origin)
+
+            mountpoint = os.path.join(SHARED_PATH, mountpoint_name)
+
+            if not os.path.exists(mountpoint):
+                os.makedirs(mountpoint)
+
+            if args.options:
+                additional = ("-o", args.options)
+            else:
+                additional = ()
+
+            if args.type == "bind":
+                mount("--bind", args.origin, mountpoint, *additional)
+            else:
+                mount("-t", args.type, args.origin, mountpoint, *additional)
+    except Error as e:
+        if len(SHARED_PATHS) == 1:
+            raise
+        print("%s: %s: %s" % (sys.argv[0], get_name(SHARED_PATH), e.args[1]))
+
+

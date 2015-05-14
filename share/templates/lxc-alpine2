@@ -1,0 +1,263 @@
+#!/bin/bash
+
+# Detect use under userns (unsupported)
+for arg in "$@"; do
+    [ "$arg" = "--" ] && break
+    if [ "$arg" = "--mapped-uid" -o "$arg" = "--mapped-gid" ]; then
+        echo "This template can't be used for unprivileged containers." 1>&2
+        echo "You may want to try the \"download\" template instead." 1>&2
+        exit 1
+    fi
+done
+
+source /usr/share/lxc/template.functions
+
+# Make sure the usual locations are in PATH
+PATH=$PATH:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+install_alpine() {
+    local name="$1"
+    local rootfs="$2"
+    shift; shift
+
+    mkdir -p "$rootfs"/etc/apk || return 1
+
+    : ${keys_dir:=/etc/apk/keys}
+    if ! [ -d "$rootfs"/etc/apk/keys ] && [ -d "$keys_dir" ]; then
+        cp -r "$keys_dir" "$rootfs"/etc/apk/keys
+    fi
+
+    if [ -n "$repository" ]; then
+        echo "$repository" > "$rootfs"/etc/apk/repositories
+    else
+        cp /etc/apk/repositories "$rootfs"/etc/apk/repositories || return 1
+        if [ -n "$release" ]; then
+            sed -i -e "s:/[^/]\+/\([^/]\+\)$:/$release/\1:" \
+                "$rootfs"/etc/apk/repositories
+        fi
+    fi
+
+    make_var "$name" && mount_var "$name" "$rootfs/var" || test $? -eq 5 || return 1
+    mount_pkg Alpine "$rootfs/var/cache/apk" || test $? -eq 5 || return 1
+    ln -s ../../var/cache/apk "$rootfs/etc/apk/cache"
+
+    local opt_arch=
+    if [ -n "$apk_arch" ]; then
+        opt_arch="--arch $apk_arch"
+    fi
+    $APK add -U --initdb --root $rootfs $opt_arch "$@" alpine-base
+}
+
+configure_alpine() {
+    local name="$1"
+    local rootfs="$2"
+
+    echo "Setting up /etc/inittab"
+    cat >"$rootfs"/etc/inittab<<EOF
+::sysinit:/sbin/rc sysinit
+::wait:/sbin/rc default
+console:12345:respawn:/sbin/getty 38400 console
+tty1:12345:respawn:/sbin/getty 38400 tty1
+tty2:12345:respawn:/sbin/getty 38400 tty2
+tty3:12345:respawn:/sbin/getty 38400 tty3
+tty4:12345:respawn:/sbin/getty 38400 tty4
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/rc shutdown
+EOF
+    # set up timezone
+    if [ -f /etc/TZ ]; then
+        cp /etc/TZ "$rootfs/etc/TZ"
+    fi
+
+    # set up nameserver
+    grep nameserver /etc/resolv.conf > "$rootfs/etc/resolv.conf"
+
+    # configure loopback
+    cat <<EOF > $rootfs/etc/network/interfaces
+auto lo
+iface lo inet loopback
+EOF
+
+    # set the hostname
+    echo $name > $rootfs/etc/hostname
+
+    # missing device nodes
+    echo "Setting up device nodes"
+    mkdir -p -m 755 "$rootfs/dev/pts"
+    mkdir -p -m 1777 "$rootfs/dev/shm"
+    mknod -m 666 "$rootfs/dev/zero" c 1 5
+    mknod -m 666 "$rootfs/dev/full" c 1 7
+    mknod -m 666 "$rootfs/dev/random" c 1 8
+    mknod -m 666 "$rootfs/dev/urandom" c 1 9
+    mknod -m 666 "$rootfs/dev/tty0" c 4 0
+    mknod -m 666 "$rootfs/dev/tty1" c 4 1
+    mknod -m 666 "$rootfs/dev/tty2" c 4 2
+    mknod -m 666 "$rootfs/dev/tty3" c 4 3
+    mknod -m 666 "$rootfs/dev/tty4" c 4 4
+#    mknod -m 600 "$rootfs/dev/initctl" p
+    mknod -m 666 "$rootfs/dev/tty" c 5 0
+    mknod -m 666 "$rootfs/dev/console" c 5 1
+    mknod -m 666 "$rootfs/dev/ptmx" c 5 2
+
+    # start services
+    ln -s /etc/init.d/bootmisc "$rootfs"/etc/runlevels/boot/bootmisc
+    ln -s /etc/init.d/syslog "$rootfs"/etc/runlevels/boot/syslog
+
+    return 0
+}
+
+configure_lxc() {
+    local path=$3
+    local rootfs=$2
+    local name=$1
+
+    # Overwrites what lxc-create did.
+    gen_config $name Alpine "$path" "$rootfs" >$path/config
+    cat >>$path/config <<EOF
+# We could drop SYS_ADMIN with little difficulties
+#lxc.cap.drop = sys_admin
+
+EOF
+
+    create_mountpoints "$rootfs"
+
+    gen_fstab $name Alpine /var/cache/apk >$path/fstab
+    echo "# Allow dropping of SYS_ADMIN (disables mount())" >>$path/fstab
+    commented fstab_entry run run     tmpfs nodev,noexec,nosuid,relatime,size=1m,mode=0755 >>$path/fstab
+    commented fstab_entry shm dev/shm tmpfs nodev,nosuid,noexec,mode=1777 >>$path/fstab
+    echo >>$path/fstab
+
+    return 0
+}
+
+die() {
+    echo "$@" >&2
+    exit 1
+}
+
+usage() {
+    cat >&2 <<EOF
+Usage: $(basename $0) [-h|--help] [-r|--repository <url>]
+                   [-R|--release <release>] [-a|--arch <arch>]
+                   [--rootfs <rootfs>] -p|--path <path> -n|--name <name>
+                   [PKG...]
+EOF
+}
+
+usage_err() {
+    usage
+    exit 1
+}
+
+optarg_check() {
+    if [ -z "$2" ]; then
+        usage_err "option '$1' requires an argument"
+    fi
+}
+
+default_path=/var/lib/lxc
+release=
+arch=$(uname -m)
+
+# template mknods, requires root
+if [ $(id -u) -ne 0 ]; then
+   echo "$(basename $0): must be run as root" >&2
+   exit 1
+fi
+
+while [ $# -gt 0 ]; do
+    opt="$1"
+    shift
+    case "$opt" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    -n|--name)
+        optarg_check $opt "$1"
+        name=$1
+        shift
+        ;;
+    --rootfs)
+        optarg_check $opt "$1"
+        rootfs=$1
+        shift
+        ;;
+    -p|--path)
+        optarg_check $opt "$1"
+        path=$1
+        shift
+        ;;
+    -r|--repository)
+        optarg_check $opt "$1"
+        repository=$1
+        shift
+	;;
+    -R|--release)
+        optarg_check $opt "$1"
+        release=$1
+        shift
+        ;;
+    -a|--arch)
+        optarg_check $opt "$1"
+        arch=$1
+        shift
+        ;;
+    --)
+        break;;
+    --*=*)
+        # split --myopt=foo=bar into --myopt foo=bar
+        set -- ${opt%=*} ${opt#*=} "$@"
+        ;;
+    -?)
+        usage_err "unknown option '$opt'"
+        ;;
+    -*)
+        # split opts -abc into -a -b -c
+        set -- $(echo "${opt#-}" | sed 's/\(.\)/ -\1/g') "$@"
+        ;;
+    esac
+done
+
+
+[ -z "$name" ] && usage_err
+
+if [ -z "${path}" ]; then
+    path="${default_path}/${name}"
+fi
+
+if [ -z "$rootfs" ]; then
+    rootfs=`awk -F= '$1 ~ /^lxc.rootfs/ { print $2 }' "$path/config" 2>/dev/null`
+    if [ -z "$rootfs" ]; then
+        rootfs="${path}/rootfs"
+    fi
+fi
+
+lxc_arch=$arch
+apk_arch=$arch
+
+case "$arch" in
+    i[3-6]86)
+        apk_arch=x86
+        lxc_arch=x86
+        ;;
+    x86)
+        lxc_arch=i686
+        ;;
+    x86_64|"")
+        ;;
+    arm*)
+        apk_arch=armhf
+        ;;
+    *)
+        die "unsupported architecture: $arch"
+        ;;
+esac
+
+which ${APK:=apk} >/dev/null || die "Missing apk-tools required to install Alpine"
+
+install_alpine "$name" "$rootfs" "$@" || die "Failed to install rootfs for $name"
+configure_alpine "$name" "$rootfs" || die "Failed to configure $name"
+configure_lxc "$name" "$rootfs" "$path"
+

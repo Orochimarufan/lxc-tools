@@ -1,0 +1,31 @@
+#!/sbin/openrc-run
+# Configure network
+
+depend() {
+	provide net networking
+}
+
+LO=lo
+
+DEVICE=
+ADDRESS=
+GATEWAY=
+
+start() {
+	ebegin "Bringing up Network ($DEVICE)"
+	ip link set dev "$LO" up && \
+		ip link set dev "$DEVICE" up && \
+		ip addr add dev "$DEVICE" "$ADDRESS" && \
+		ip route add default via "$GATEWAY"
+	rt=$?
+	eend $rt
+	return $rt
+}
+
+stop() {
+	ebegin "Bringing down Network ($DEVICE)"
+	ip addr del dev "$DEVICE" "$ADDRESS"
+	ip link set dev "$DEVICE" down
+	eend $?
+}
+

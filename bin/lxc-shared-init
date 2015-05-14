@@ -1,0 +1,11 @@
+#!/bin/bash -x
+# (c) 2014 Taeyeon Mori
+# Create a shared mountpoint
+
+SHARED=/run/lxc/shared
+
+test -d $SHARED || mkdir -p $SHARED
+mount -t tmpfs shared $SHARED
+mount --make-unbindable $SHARED
+mount --make-shared $SHARED
+

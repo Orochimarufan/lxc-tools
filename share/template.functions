@@ -1,0 +1,222 @@
+#!/bin/bash
+# Utilities for lxc templates on Toukyou host
+# (c) 2015 Taeyeon Mori
+
+# The following environment vars are respected:
+# $LXC_CREATE_NO_VAR    :: Don't create a separate /var subvolume
+# $lXC_CREATE_NO_PKG    :: Don't share the distribution package cache
+# $LXC_CREATE_NO_SHARED :: Don't set up lxc-shared-mount
+# $LXC_CREATE_NO_CDEV   :: Don't bind the cdev runtime at /var/lib/cdev
+
+# The following are options for the system
+VAR_DRIVE=/dev/sdd2         # The btrfs volume that should contain the /var subvolumes
+VAR_PREFIX=ContainerVar/    # The prefix added to the container name to get the /var subvolume name
+
+PKG_DRIVE=/dev/sdd2         # The btrfs volume that should contain the shared distribution package chaches
+PKG_PREFIX=Packages/        # The prefix added to the distribution name to get the subvolume name
+
+LXC_SHARE=/usr/share/lxc    # Shared lxc files (Where this file is) usually /usr/share/lxc
+
+SHARED_MOUNT=shared         # Mountpoint for lxc-shared-mount, relative to rootfs
+
+LXC_BRIDGE_NAME=Yamanote    # The name of the network bridge to attach the containers to
+
+# ===== Code from here =====
+create_mountpoints() {
+    # prepare_rootfs <rootfs>
+    # Create mountpoints. This doesn't actually mount anything, nor does it create the /var subvolume
+    
+    local rootfs="$1"
+
+    test -z "$LXC_CREATE_NO_SHARED" && mkdir -p "$rootfs/$SHARED_MOUNT"
+    test -z "$lXC_CREATE_NO_CDEV" && mkdir -p "$rootfs/var/lib/cdev"
+}
+
+make_var() {
+    # make_var <container name>
+    # create a /var subvolume for <container name>
+    
+    test -n "$LXC_CREATE_NO_VAR" && return 5
+
+    local tmp=`mktemp -d`
+    local rt=0
+    
+    mount -t btrfs $VAR_DRIVE "$tmp"
+    
+    if ! test -e "$tmp/$VAR_PREFIX$1"; then
+        btrfs subvolume create "$tmp/$VAR_PREFIX$1"
+    else
+        echo "ERROR: Cannot create Container /var: $VAR_PREFIX$1 exists"
+        rt=1
+    fi
+
+    umount "$tmp"
+    rmdir "$tmp"
+
+    return $rt
+}
+
+mount_var() {
+    # mount_var <container name> <mountpoint>
+    # Mount a container's /var at <mountpoint>
+
+    test -n "$LXC_CREATE_NO_VAR" && return 5
+    
+    mkdir -p "$2"
+    mount -t btrfs $VAR_DRIVE "$2" -o "subvol=$VAR_PREFIX$1"
+}
+
+__make_pkg() {
+    # __make_pkg <distro>
+    # Ensure the package cache for <distro> exists
+
+    local tmp=`mktemp -d`
+    mount -t btrfs $PKG_DRIVE "$tmp"
+    if ! test -e "$tmp/$PKG_PREFIX$1"; then
+        btrfs subvolume create "$tmp/$PKG_PREFIX$1"
+    fi
+    umount "$tmp"
+    rmdir "$tmp"
+}
+
+mount_pkg() {
+    # mount_pkg <distro> <mountpoint>
+    # Mount a distro's package cache at <mountpoint>
+
+    test -n "$LXC_CREATE_NO_PKG" && return 5
+
+    mkdir -p "$2"
+    if ! mount -t btrfs $PKG_DRIVE "$2" -o "subvol=$PKG_PREFIX$1"; then
+        __make_pkg $1
+        mount -t btrfs $PKG_DRIVE "$2" -o "subvol=$PKG_PREFIX$1"
+    fi
+}
+
+
+fstab_entry() {
+    # _fstab <what> <where> <type> <options>
+    # create a fstab entry
+    printf "%-27s %-19s %-7s %s 0 0\n" "$@"
+}
+
+commented() {
+    printf "#"
+    "$@"
+}
+
+_no_abs() {
+    # strip any leading slashes
+    # LXC mount points mustn't be absolute but relative to $rootfs!
+    local pt=$1
+    local m=true
+    while test "${pt:0:1}" = /; do
+        echo "Warning: absolute LXC mountpoint: $pt, stripping" >&2
+        pt=${pt:1}
+    done
+    echo $pt
+}
+
+gen_fstab() {
+    # common_fstab <container name> <distro> [package cache mountpoint]
+    # Generate fstab entries for <container name>
+    local name=$1
+    local distro=$2
+    local pcmount=$(_no_abs $3)
+
+    echo "# $distro $name fstab [@Toukyou]"
+
+    if test -z "$LXC_CREATE_NO_VAR"; then
+        echo "# /var filesystem"
+        fstab_entry $VAR_DRIVE var btrfs subvol=$VAR_PREFIX$name
+        echo
+    fi
+
+    if test -n "$pcmount" && test -z "$LXC_CREATE_NO_PKG"; then
+        echo "# $distro package cache"
+        fstab_entry $PKG_DRIVE $pcmount btrfs subvol=$PKG_PREFIX$distro
+        echo
+    fi
+
+    if test -z "$LXC_CREATE_NO_SHARED"; then
+        echo "# Shared mounts"
+        fstab_entry /run/lxc/shared/$name shared none bind
+        echo
+    fi
+    
+    if test -z "$LXC_CREATE_NO_CDEV"; then
+        echo "# cdev socket"
+        fstab_entry /var/lib/cdev var/lib/cdev none bind
+        echo
+    fi
+}
+
+gen_config() {
+    # gen_config <container name> <distro> <path> <rootfs>
+    # Generate config entries for <container name>
+    local name=$1
+    local distro=$2
+    local path=$3
+    local rootfs=$4
+
+    # find common.conf
+    local common="$LXC_SHARE/config/${distro,,}.common.conf"
+    if ! test -e "$common"; then
+        common="$LXC_SHARE/config/common.conf"
+    fi
+
+    # Write config
+    cat <<EOF
+# $distro $name config [@Toukyou]
+lxc.include = $common
+
+# Container
+lxc.utsname = $name
+EOF
+
+    test -n "$lxc_arch" && echo "lxc.arch = $lxc_arch"
+
+    cat <<EOF
+
+# File system
+lxc.rootfs = $rootfs
+lxc.mount = $path/fstab
+EOF
+
+    test -z "$LXC_CREATE_NO_SHARED" && echo "lxc.hook.pre-start = $LXC_SHARE/scripts/cinit-shared.sh"
+
+    cat <<EOF
+
+# Network
+lxc.network.type = veth
+lxc.network.name = $LXC_BRIDGE_NAME
+lxc.network.link = $LXC_BRIDGE_NAME
+lxc.network.veth.pair = $name
+
+EOF
+}
+
+gen_coptions() {
+    # gen_coptions <container name>
+    # save the options employed when creating this container
+
+    cat <<EOF
+# LXC @Toukyou options for $1
+# See $LXC_SHARE/template.functions for details
+
+VAR_DRIVE="$VAR_DRIVE"
+VAR_PREFIX="$VAR_PREFIX"
+
+PKG_DRIVE="$PKG_DRIVE"
+PKG_PREFIX="$PKG_PREFIX"
+
+LXC_SHARE="$LXC_SHARE"
+
+LXC_BRIDGE_NAME="$LXC_BRIDGE_NAME"
+
+LXC_CREATE_NO_VAR="$LXC_CREATE_NO_VAR"
+LXC_CREATE_NO_PKG="$LXC_CREATE_NO_PKG"
+LXC_CREATE_NO_SHARED="$LXC_CREATE_NO_SHARED"
+LXC_CREATE_NO_CDEV="$LXC_CREATE_NO_CDEV"
+EOF
+}
+

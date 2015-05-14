@@ -1,0 +1,47 @@
+#!/bin/bash
+# (c) 2014-2015 Taeyeon Mori
+# Script to batch-update lxc containers
+
+if [[ "$1" = "-a" || "$1" = "--all" ]]; then
+    shift
+    all_containers="`lxc-ls`"
+    containers=
+    for container in $all_containers; do
+        if [[ `lxc-info -sHn $container` = "RUNNING" ]] && ! echo $@ | grep -q $container; then
+            containers="$containers $container"
+        fi
+    done
+elif [[ "$1" = "-h" || "$1" = "--help" || -z "$1" ]]; then
+    echo "Synopsis: $0 <container-names>"
+    echo "          $0 -a <exclude-container-names>"
+    echo
+    echo "Batch-update LXC containers. Supports Arch, Debian and Alpine guests."
+    echo "Unfortunately, Arch containers must employ a ssh to (container-)localhost because pacman doesn't work with lxc-attach."
+    echo
+    echo "Options:"
+    echo "    -h, --help    Show this help message"
+    echo "    -a, --all     Update all RUNNING containers except..."
+    [[ -z "$1" ]] && exit 1 || exit 0
+else
+    containers="$@"
+fi
+
+for i in $containers; do
+    echo -e "\033[31mUpdating $i\033[0m"
+    lxc-attach -n $i -- /bin/sh -l -c '. /etc/os-release; \
+case "x$ID" in \
+    xarch) \
+        echo -e "\\033[1;31mPacman doesnt like lxc-attach. Using a local ssh connection.\\033[0m"; \
+        ssh -t localhost -- pacman -Syu;; \
+    xdebian) \
+    xubuntu) \
+        apt update; \
+        apt dist-upgrade;; \
+    xalpine) \
+        apk update; \
+        apk upgrade;;\
+    *) \
+        echo "Unsupported Distribution: $PRETTY_NAME";; \
+esac'
+done
+
