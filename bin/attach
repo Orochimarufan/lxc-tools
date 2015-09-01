@@ -1,3 +1,3 @@
 #!/bin/sh
-lxc-attach -n "$@" -- /bin/sh -l
+exec lxc-attach -n "$@" -- /bin/sh -lc 'SHELL=`which zsh 2>/dev/null` || SHELL=`which bash 2>/dev/null` || SHELL=/bin/sh && exec $SHELL -l'
 

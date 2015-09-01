@@ -16,7 +16,7 @@ elif [[ "$1" = "-h" || "$1" = "--help" || -z "$1" ]]; then
     echo "          $0 -a <exclude-container-names>"
     echo
     echo "Batch-update LXC containers. Supports Arch, Debian and Alpine guests."
-    echo "Unfortunately, Arch containers must employ a ssh to (container-)localhost because pacman doesn't work with lxc-attach."
+    echo "Unfortunately, progress output is limited with Arch's pacman due to lxc-attach issues."
     echo
     echo "Options:"
     echo "    -h, --help    Show this help message"
@@ -31,10 +31,8 @@ for i in $containers; do
     lxc-attach -n $i -- /bin/sh -l -c '. /etc/os-release; \
 case "x$ID" in \
     xarch) \
-        echo -e "\\033[1;31mPacman doesnt like lxc-attach. Using a local ssh connection.\\033[0m"; \
-        ssh -t localhost -- pacman -Syu;; \
-    xdebian) \
-    xubuntu) \
+        pacman -Syu --noconfirm | cat; : The cat is needed to shut up GPG errors ;; \
+    xdebian|xubuntu) \
         apt update; \
         apt dist-upgrade;; \
     xalpine) \

@@ -69,7 +69,7 @@ else:
     SHARED_PATHS = [os.path.join(SHARED_DIR, args.name)]
 
     if not os.path.isdir(SHARED_PATHS[0]):
-        raise Error("%s doesnt exist, aborting!" % SHARED_PATH)
+        raise Error("%s doesnt exist, aborting!" % SHARED_PATHS[0])
 
 
 if len(SHARED_PATHS) == 1:
