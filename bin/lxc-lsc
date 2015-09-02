@@ -1,0 +1,27 @@
+#!/bin/sh
+
+STOPPED_C="31"
+RUNNING_C="1;32"
+
+if [ -z "$COLUMNS" ]; then
+    COLUMNS=`stty size 2>/dev/null | cut -d" " -f2 2>/dev/null`
+    if [ -z "$COLUMNS" ]; then
+        COLUMNS=80
+    fi
+fi
+
+CW=0
+for c in `lxc-ls`; do
+    CW=$[ $CW + 1 + ${#c} ]
+    if [ "$CW" -gt ${COLUMNS-80} ]; then
+        printf "\b\n"
+    fi
+    if lxc-info -n $c | grep -q RUNNING; then
+        printf "\033[${RUNNING_C}m"
+    else
+        printf "\033[${STOPPED_C}m"
+    fi
+    printf "$c\033[0m "
+done
+printf "\b\n"
+
