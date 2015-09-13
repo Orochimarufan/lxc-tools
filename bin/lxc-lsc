@@ -13,7 +13,7 @@ fi
 CW=0
 for c in `lxc-ls`; do
     CW=$[ $CW + 1 + ${#c} ]
-    if [ "$CW" -gt ${COLUMNS-80} ]; then
+    if [ $CW -gt $COLUMNS ]; then
         printf "\b\n"
     fi
     if lxc-info -n $c | grep -q RUNNING; then

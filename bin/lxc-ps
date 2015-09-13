@@ -1,0 +1,73 @@
+#!/bin/bash
+
+set -e
+
+usage() {
+    echo "Usage: $1 [-h] [-p PID] [-n NAME] [-N] [-- <ps arguments>]"
+    echo
+    echo "    A simple tool to list all processes in a namespace"
+    echo "    (c) 2015 Taeyeon Mori"
+    echo
+    echo "Options:"
+    echo "    -h        Display this help message"
+    echo "    -p PID    All processes in the same namespace as PID"
+    echo "    -n NAME   All processes in the namespace of the NAME lxc container"
+    echo "    -N        Match by Network namespace (default: PID namspace)"
+    echo "    --        Treat all following arguments as arguments to ps(1)"
+    exit $2
+}
+
+PID=
+NAME=
+NS=pid
+PSARGS=
+
+NEXT=
+for arg in "$@"; do
+    if [ -z "$NEXT" ]; then
+        case "$arg" in
+            -h) usage "$0" 0;;
+            -p) NEXT=PID;;
+            -n) NEXT=NAME;;
+            -N) NS=net;;
+            --) NEXT=psargs;;
+            *) usage "$0" 1;;
+        esac
+    elif [ "$NEXT" = "psargs" ]; then
+        PSARGS="$PSARGS \"$arg\""
+    else
+        eval "$NEXT=\"\$arg\""
+        NEXT=
+    fi
+done
+
+if [ -z "$PID" ]; then
+    if [ -n "$NAME" ]; then
+        PID="`lxc-info -pHn "$NAME"`"
+    else
+        echo "ERROR: Either -p or -n must be given!"
+        exit 1
+    fi
+elif [ -n "$NAME" ]; then
+    echo "WARNING: Both -p and -n are specified; using -p"
+fi
+
+THISNS=`readlink /proc/$PID/task/$PID/ns/$NS`
+MATCHNS=`echo $THISNS | sed -e 's/\[/\\\\[/g' -e 's/\]/\\\\]/g'`
+
+echo "> $PID's $NS namespace: $THISNS"
+
+pids=
+while IFS= read -r -d '' f; do
+    fx=${f#/proc/}
+    pids="$pids ${fx%%/*}"
+done < <(find /proc -type l -path "*/task/*/ns/$NS" -lname "$MATCHNS" -print0)
+
+if [ -z "$pids" ]; then
+    echo "ERROR: could not list processes"
+else
+    pids="${pids# }"
+fi
+
+exec ps p "$pids" $PSARGS
+
